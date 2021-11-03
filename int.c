@@ -2,7 +2,7 @@
 #include <bpf/bpf_helpers.h>
 #include "common.h"
 
-struct writev_iovec{
+struct writev_iovec {
 	const struct iovec *vec;
 	unsigned long vlen;
 };
@@ -49,6 +49,7 @@ struct heap_buffer {
 	char buf[HEAP_BUFFER_SIZE];
 };
 
+/* This is the temporary storage - 'heap', used to copy userspace buffers */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, 1);
@@ -60,7 +61,7 @@ struct {
 
 #if 0
 SEC("tracepoint/syscalls/sys_enter_execve")
-int bpf_prog(void *ctx) 
+int bpf_prog(void *ctx)
 {
 	char msg[] = "123";
 	char err_msg[] = "Failed to write to perf buffer";
@@ -71,10 +72,9 @@ int bpf_prog(void *ctx)
 	long written;
 
 	e = bpf_map_lookup_elem(&heap, &zero);
-	if (!e) {
+	if (!e)
 		return 0;
-	}
-	
+
 	written = bpf_probe_read_str(&e->data, HEAP_BUFFER_SIZE - sizeof(struct event), umsg);
 	if (written < 0) {
 		bpf_trace_printk(copy_err, sizeof(copy_err));
@@ -83,65 +83,62 @@ int bpf_prog(void *ctx)
 	e->size = written;
 
 	//BPF_F_CURRENT_CPU
-	if (bpf_perf_event_output(ctx, &my_map, BPF_F_CURRENT_CPU, e, sizeof(*e) + written) < 0) {
+	if (bpf_perf_event_output(ctx, &my_map, BPF_F_CURRENT_CPU, e, sizeof(*e) + written) < 0)
 		bpf_trace_printk(err_msg, sizeof(err_msg));
-	} else {
+	else
 		bpf_trace_printk(msg, sizeof(msg));
-	}
+
 	return 0;
 }
-
 #endif
 
-__attribute__((always_inline))
-int trace_sendxx_enter(struct sendxx_enter_ctx *ctx)
+static inline int match_app_name(void)
 {
-    char name[] = APP_NAME;
-    char comm[256];
-	int zero = 0;
+	char name[] = APP_NAME;
+	char comm[256];
 
 	bpf_get_current_comm(&comm, sizeof(comm));
 
 	for (int i = 0; i < sizeof(name); i++) {
-		if (comm[i] != name[i]) {
-			//bpf_trace_printk("the string value is something else--> |%s|\\n", comm);
-			return 0;
-		}
+		if (comm[i] != name[i])
+			return -1;
 	}
+	return 0;
+}
 
+//__attribute__((always_inline))
+static inline int trace_sendxx_enter(struct sendxx_enter_ctx *ctx)
+{
+	int zero = 0;
+	void *p;
+
+	if (match_app_name())
+		return 0;
 	//bpf_printk("read() system call, addr = %x   count = %u", (unsigned long long)ctx->buf, ctx->count);
-	void *p = ctx->buf;
+	p = ctx->buf;
 	bpf_map_update_elem(&saved_write_ctx, &zero, &p, BPF_ANY);
 	return 0;
 }
 
-__attribute__((always_inline))
-int trace_sendxx_exit(struct sendxx_exit_ctx *ctx)
+//__attribute__((always_inline))
+static inline int trace_sendxx_exit(struct sendxx_exit_ctx *ctx)
 {
 	struct event *e;
-	char name[] = APP_NAME;
-	char comm[256];
+	void **ubuf;
 	int zero = 0;
+	long min;
 
-	bpf_get_current_comm(&comm, sizeof(comm));
-
-	for (int i = 0; i < sizeof(APP_NAME); i++) {
-		if (comm[i] != name[i]) {
-			//bpf_trace_printk("the string value is something else--> |%s|\\n", comm);
-			return 0;
-		}
-	}
+	if (match_app_name())
+		return 0;
 
 	bpf_printk("sendxx() exit call, ret = %ld", ctx->ret);
 
-	void **ubuf = bpf_map_lookup_elem(&saved_write_ctx, &zero);
-	if (!ubuf) {
+	ubuf = bpf_map_lookup_elem(&saved_write_ctx, &zero);
+	if (!ubuf)
 		return 0;
-	}
 
-	if (ctx->ret <= 0) {
+	if (ctx->ret <= 0)
 		return 0;
-	}
 
 	e = bpf_map_lookup_elem(&heap, &zero);
 	if (!e) {
@@ -149,7 +146,7 @@ int trace_sendxx_exit(struct sendxx_exit_ctx *ctx)
 		return 0;
 	}
 
-	long min = MIN(ctx->ret, PERF_MAP_SPACE);
+	min = MIN(ctx->ret, PERF_MAP_SPACE);
 	if (bpf_probe_read_user(e->data, min, *ubuf)) {
 		bpf_printk("Failed to copy userspace buffer to heap");
 		return 0;
@@ -164,13 +161,15 @@ int trace_sendxx_exit(struct sendxx_exit_ctx *ctx)
 }
 
 SEC("tracepoint/syscalls/sys_enter_sendto")
-int trace_send_enter(struct sendxx_enter_ctx *ctx) {
+int trace_send_enter(struct sendxx_enter_ctx *ctx)
+{
 
 	return trace_sendxx_enter(ctx);
 }
 
 SEC("tracepoint/syscalls/sys_exit_sendto")
-int trace_send_exit(struct sendxx_exit_ctx *ctx) {
+int trace_send_exit(struct sendxx_exit_ctx *ctx)
+{
 
 	return trace_sendxx_exit(ctx);
 }
@@ -178,21 +177,13 @@ int trace_send_exit(struct sendxx_exit_ctx *ctx) {
 SEC("tracepoint/syscalls/sys_enter_write")
 int trace_write_enter(struct write_enter_ctx *ctx)
 {
-    char name[] = APP_NAME;
-    char comm[256];
+	void *p;
 	int zero = 0;
 
-	bpf_get_current_comm(&comm, sizeof(comm));
-
-	for (int i = 0; i < sizeof(name); i++) {
-		if (comm[i] != name[i]) {
-			//bpf_trace_printk("the string value is something else--> |%s|\\n", comm);
-			return 0;
-		}
-	}
-
+	if (match_app_name())
+		return 0;
 	//bpf_printk("read() system call, addr = %x   count = %u", (unsigned long long)ctx->buf, ctx->count);
-	void *p = ctx->buf;
+	p = ctx->buf;
 	bpf_map_update_elem(&saved_write_ctx, &zero, &p, BPF_ANY);
 	return 0;
 }
@@ -201,30 +192,21 @@ SEC("tracepoint/syscalls/sys_exit_write")
 int trace_write_exit(struct write_exit_ctx *ctx)
 {
 	struct event *e;
-	char name[] = APP_NAME;
-	char comm[256];
+	void **ubuf;
 	int zero = 0;
+	long min;
 
-	bpf_get_current_comm(&comm, sizeof(comm));
-
-	for (int i = 0; i < sizeof(APP_NAME); i++) {
-		if (comm[i] != name[i]) {
-			//bpf_trace_printk("the string value is something else--> |%s|\\n", comm);
-			return 0;
-		}
-	}
-
+	if (match_app_name())
+		return 0;
 	//bpf_printk("\nread() exit call, diff = %d   sizeof(int) %u", (char*)&ctx->ret - (char*)ctx, sizeof(int));
 	bpf_printk("write() exit call, ret = %ld", ctx->ret);
 
-	void **ubuf = bpf_map_lookup_elem(&saved_write_ctx, &zero);
-	if (!ubuf) {
+	ubuf = bpf_map_lookup_elem(&saved_write_ctx, &zero);
+	if (!ubuf)
 		return 0;
-	}
 
-	if (ctx->ret <= 0) {
+	if (ctx->ret <= 0)
 		return 0;
-	}
 
 	e = bpf_map_lookup_elem(&heap, &zero);
 	if (!e) {
@@ -232,7 +214,7 @@ int trace_write_exit(struct write_exit_ctx *ctx)
 		return 0;
 	}
 
-	long min = MIN(ctx->ret, PERF_MAP_SPACE);
+	min = MIN(ctx->ret, PERF_MAP_SPACE);
 	if (bpf_probe_read_user(e->data, min, *ubuf)) {
 		bpf_printk("Failed to copy userspace buffer to heap");
 		return 0;
@@ -249,19 +231,11 @@ int trace_write_exit(struct write_exit_ctx *ctx)
 SEC("tracepoint/syscalls/sys_enter_writev")
 int trace_writev_enter(struct writev_enter_ctx *ctx)
 {
-    char name[] = APP_NAME;
-    char comm[256];
 	struct writev_iovec ubuf;
 	int zero = 0;
 
-	bpf_get_current_comm(&comm, sizeof(comm));
-
-	for (int i = 0; i < 6; i++) {
-		if (comm[i] != name[i]) {
-			//bpf_trace_printk("sys_enter_writev: the string value is something else--> |%s|\\n", comm);
-			return 0;
-		}
-	}
+	if (match_app_name())
+		return 0;
 	//bpf_printk("writev() system call,  vec = %d", (char*)&ctx->vec - (char*)ctx);
 
 	ubuf.vec = ctx->vec;
@@ -274,72 +248,73 @@ SEC("tracepoint/syscalls/sys_exit_writev")
 int trace_writev_exit(struct writev_exit_ctx *ctx)
 {
 	struct event *e;
-    char name[] = APP_NAME;
-    char comm[256];
+	struct writev_iovec *ubuf;
 	int zero = 0;
 
-	bpf_get_current_comm(&comm, sizeof(comm));
-
-	for (int i = 0; i < 6; i++) {
-		if (comm[i] != name[i]) {
-			//bpf_trace_printk("sys_exit_writev: the string value is something else--> |%s|\\n", comm);
-			return 0;
-		}
-	}
-	bpf_printk("writev() system exit call,  ret_offset= %d  ctx->ret = %ld", (char*)&ctx->ret - (char*)ctx, ctx->ret);
-
-	if (ctx->ret <= 0) {
+	//bpf_printk("writev() system exit call,  ret_offset= %d  ctx->ret = %ld", (char*)&ctx->ret - (char*)ctx, ctx->ret);
+	if (match_app_name())
 		return 0;
-	}
 
-	struct writev_iovec *ubuf = bpf_map_lookup_elem(&saved_writev_ctx, &zero);
-	if (!ubuf) {
+	if (ctx->ret <= 0)
 		return 0;
-	}
+
+	ubuf = bpf_map_lookup_elem(&saved_writev_ctx, &zero);
+	if (!ubuf)
+		return 0;
 
 	e = bpf_map_lookup_elem(&heap, &zero);
 	if (!e) {
-		bpf_printk("perf map lookup failed, Impossible");
+		//bpf_printk("perf map lookup failed, Impossible");
 		return 0;
 	}
-	
+
 	unsigned long min_vectors = MIN(64, ubuf->vlen);
-	unsigned long max_bytes = MIN((unsigned long)ctx->ret, PERF_MAP_SPACE);
+	//unsigned long max_bytes = MIN((unsigned long)ctx->ret, PERF_MAP_SPACE);
 	unsigned long written = 0;
 	for (unsigned long i = 0; i < min_vectors; i++) {
 
 		struct iovec iov;
+
 		if (bpf_probe_read_user(&iov, sizeof(struct iovec), ubuf->vec + i)) {
 
-			bpf_printk("Failed to copy userspace iovec entry %u to stack", i);
+			//bpf_printk("Failed to copy userspace iovec entry %u to stack", i);
 			return 0;
 		}
-		unsigned long min = iov.iov_len;
-		//if (iov.iov_len >= (max_bytes - written)) {
-		if (min >= max_bytes) {
+		//unsigned long min = iov.iov_len;
+		//if (min >= max_bytes) {
+		if (iov.iov_len > PERF_MAP_SPACE)
 			break;
-		}
+
+		if ((iov.iov_len + written) > PERF_MAP_SPACE)
+			break;
+	#if 0
+		if (iov.iov_len >= (max_bytes - written))
+			break;
+
 		//unsigned long min = MIN(MIN(ctx->ret, PERF_MAP_SPACE) - written, iov.iov_len);
 		//unsigned long min = MIN(ctx->ret, PERF_MAP_SPACE);
-	#if 1
 		char *addr = e->data + written;
-		if ((addr + min) >= (e->data + PERF_MAP_SPACE - 1)) {
+		if ((addr + min) >= (e->data + PERF_MAP_SPACE - 1))
 			break;
-		}
 
 		if (bpf_probe_read_user(addr, min, iov.iov_base)) {
-		//if (bpf_probe_read_user(e->data + written, min, iov.iov_base)) {
+			char *addr = e->data + written;
+			if (addr > ((char *)e->data + PERF_MAP_SPACE))
+				return 0;
+
+		if (bpf_probe_read_user(addr, iov.iov_len, iov.iov_base)) {
+		//if (bpf_probe_read_user(e->data + written, iov.iov_len, iov.iov_base)) {
 		//if (bpf_probe_read_user(e->data, min, iov.iov_base)) {
-			bpf_printk("Failed to copy userspace buffer to heap");
+			//bpf_printk("Failed to copy userspace buffer to heap");
 			return 0;
 		}
-	#endif
-		written += min;
-		//written += iov.iov_len;
+		//written += min;
+		written += iov.iov_len;
 		//max_bytes -= iov.iov_len;
+	#endif
 	}
 
-	bpf_printk("writev_exit: written %lu bytes", written);
+	//bpf_printk("writev_exit: written %lu bytes", written);
 	return 0;
 }
 
@@ -347,28 +322,19 @@ SEC("tracepoint/syscalls/sys_exit_recvfrom")
 int trace_recvfrom_exit(struct recvfrom_exit_ctx *ctx)
 {
 	struct event *e;
-    char name[] = APP_NAME;
-    char comm[256];
+	void **ubuf;
 	int zero = 0;
+	long min;
 
-	bpf_printk("recvfrom() exit, ret diff = %d   ctx->ret = %ld", (char*)&ctx->ret - (char*)ctx, ctx->ret);
-    bpf_get_current_comm(&comm, sizeof(comm));
-
-    for (int i = 0; i < sizeof(name); i++) {
-        if (comm[i] != name[i]) {
-            bpf_printk("sys_exit_recvfrom: the string value is something else--> |%s|\n\n", comm);
-            return 0;
-        }
-    }
-
-	void **ubuf = bpf_map_lookup_elem(&saved_rcvfrom_ctx, &zero);
-	if (!ubuf) {
+	if (match_app_name())
 		return 0;
-	}
 
-	if (ctx->ret <= 0) {
+	ubuf = bpf_map_lookup_elem(&saved_rcvfrom_ctx, &zero);
+	if (!ubuf)
 		return 0;
-	}
+
+	if (ctx->ret <= 0)
+		return 0;
 
 	e = bpf_map_lookup_elem(&heap, &zero);
 	if (!e) {
@@ -376,7 +342,7 @@ int trace_recvfrom_exit(struct recvfrom_exit_ctx *ctx)
 		return 0;
 	}
 
-	long min = MIN(ctx->ret, PERF_MAP_SPACE);
+	min = MIN(ctx->ret, PERF_MAP_SPACE);
 	if (bpf_probe_read_user(e->data, min, *ubuf)) {
 		bpf_printk("Failed to copy userspace buffer to heap");
 		return 0;
@@ -394,19 +360,11 @@ int trace_recvfrom_exit(struct recvfrom_exit_ctx *ctx)
 SEC("tracepoint/syscalls/sys_enter_recvfrom")
 int trace_recvfrom_enter(struct recvfrom_enter_ctx *ctx)
 {
-	char name[] = APP_NAME;
-	char comm[256];
 	void *p;
 	int zero = 0;
 
-	bpf_get_current_comm(&comm, sizeof(comm));
-
-	for (int i = 0; i < 6; i++) {
-		if (comm[i] != name[i]) {
-			//bpf_trace_printk("the string value is something else--> |%s|\\n", comm);
-			return 0;
-		}
-	}
+	if (match_app_name())
+		return 0;
 
 	p = ctx->ubuf;
 	bpf_map_update_elem(&saved_rcvfrom_ctx, &zero, &p, BPF_ANY);
@@ -416,21 +374,13 @@ int trace_recvfrom_enter(struct recvfrom_enter_ctx *ctx)
 SEC("tracepoint/syscalls/sys_enter_read")
 int trace_read_enter(struct read_enter_ctx *ctx)
 {
-	char name[] = "server";
-	char comm[256];
-
-	bpf_get_current_comm(&comm, sizeof(comm));
-
-	for (int i = 0; i < 7; i++) {
-		if (comm[i] != name[i]) {
-			//bpf_trace_printk("the string value is something else--> |%s|\\n", comm);
-			return 0;
-		}
-	}
-
-	//bpf_printk("read() system call, addr = %x   count = %u", (unsigned long long)ctx->buf, ctx->count);
 	int zero = 0;
 	void *p = ctx->buf;
+
+	if (match_app_name())
+		return 0;
+
+	//bpf_printk("read() system call, addr = %x   count = %u", (unsigned long long)ctx->buf, ctx->count);
 	bpf_map_update_elem(&saved_read_ctx, &zero, &p, BPF_ANY);
 	return 0;
 }
@@ -440,30 +390,22 @@ SEC("tracepoint/syscalls/sys_exit_read")
 int trace_read_exit(struct read_exit_ctx *ctx)
 {
 	struct event *e;
-	char name[] = "server";
-	char comm[256];
+	void **ubuf;
 	int zero = 0;
+	long min;
 
-	bpf_get_current_comm(&comm, sizeof(comm));
-
-	for (int i = 0; i < 7; i++) {
-		if (comm[i] != name[i]) {
-			//bpf_trace_printk("the string value is something else--> |%s|\\n", comm);
-			return 0;
-		}
-	}
+	if (match_app_name())
+		return 0;
 
 	//bpf_printk("\nread() exit call, diff = %d   sizeof(int) %u", (char*)&ctx->ret - (char*)ctx, sizeof(int));
 	bpf_printk("read() exit call, ret = %ld", ctx->ret);
 
-	void **ubuf = bpf_map_lookup_elem(&saved_read_ctx, &zero);
-	if (!ubuf) {
+	ubuf = bpf_map_lookup_elem(&saved_read_ctx, &zero);
+	if (!ubuf)
 		return 0;
-	}
 
-	if (ctx->ret <= 0) {
+	if (ctx->ret <= 0)
 		return 0;
-	}
 
 	e = bpf_map_lookup_elem(&heap, &zero);
 	if (!e) {
@@ -471,7 +413,7 @@ int trace_read_exit(struct read_exit_ctx *ctx)
 		return 0;
 	}
 
-	long min = MIN(ctx->ret, PERF_MAP_SPACE);
+	min = MIN(ctx->ret, PERF_MAP_SPACE);
 	if (bpf_probe_read_user(e->data, min, *ubuf)) {
 		bpf_printk("Failed to copy userspace buffer to heap");
 		return 0;
@@ -486,4 +428,3 @@ int trace_read_exit(struct read_exit_ctx *ctx)
 }
 
 char _license[] SEC("license") = "GPL";
-
