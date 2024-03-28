@@ -60,8 +60,8 @@ int main(int argc, char **argv)
     }
 */
 
-	pb_opts.sample_cb = event_cb;
-	pb = perf_buffer__new(map_fd, 8, &pb_opts); /* 32KB */
+	//pb_opts.sample_cb = event_cb;
+	pb = perf_buffer__new(map_fd, 8, event_cb, NULL, NULL, NULL); /* 32KB */
 	if (libbpf_get_error(pb)) {
 		printf("failed to setup perf_buffer\n");
 		return 1;
